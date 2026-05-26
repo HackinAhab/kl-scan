@@ -165,6 +165,111 @@ func SinceToSeconds(d time.Duration) int64 {
 	return int64(d.Seconds())
 }
 
+// FollowOpts controls a single follow stream's behaviour.
+type FollowOpts struct {
+	// SinceTime, if non-nil, is sent to the apiserver as PodLogOptions.SinceTime.
+	// Use this when reattaching to a target after a watermark has been recorded.
+	SinceTime *time.Time
+	// SinceSeconds is used only when SinceTime is nil; converts the operator's
+	// --watch-since flag.
+	SinceSeconds int64
+	// MaxLineBytes caps line length passed to the scanner.
+	MaxLineBytes int
+}
+
+// StreamOneFollow opens a single follow=true log stream for the target and
+// blocks pushing lines into out until the stream ends (EOF, error, or ctx
+// cancelled). The onLine callback, if non-nil, is invoked with each line's
+// parsed timestamp; the rotator uses this to maintain per-target watermarks.
+//
+// Returns nil on a clean exit (EOF or ctx done) and an error if opening the
+// stream or scanning failed.
+func StreamOneFollow(
+	ctx context.Context,
+	client *Client,
+	t PodTarget,
+	opts FollowOpts,
+	out chan<- detect.LogLine,
+	onLine func(time.Time),
+) error {
+	if opts.MaxLineBytes <= 0 {
+		opts.MaxLineBytes = defaultMaxLineBytes
+	}
+
+	logOpts := &corev1.PodLogOptions{
+		Container:  t.Container,
+		Timestamps: true,
+		Follow:     true,
+	}
+	if opts.SinceTime != nil {
+		mt := metav1.NewTime(*opts.SinceTime)
+		logOpts.SinceTime = &mt
+	} else if opts.SinceSeconds > 0 {
+		s := opts.SinceSeconds
+		logOpts.SinceSeconds = &s
+	}
+
+	logger.Infof("follow open  %s/%s [%s]", t.Namespace, t.PodName, t.Container)
+	logger.Debugf("GET pods/%s/log?follow=true&container=%s&sinceSeconds=%d  ns=%s",
+		t.PodName, t.Container, opts.SinceSeconds, t.Namespace)
+
+	req := client.Clientset.CoreV1().Pods(t.Namespace).GetLogs(t.PodName, logOpts)
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		// Treat ctx cancellation as a clean exit.
+		if ctx.Err() != nil {
+			return nil
+		}
+		logger.Errorf("follow err  %s/%s [%s]: %v", t.Namespace, t.PodName, t.Container, err)
+		return fmt.Errorf("stream %s/%s[%s]: %w", t.Namespace, t.PodName, t.Container, err)
+	}
+	defer stream.Close()
+
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, opts.MaxLineBytes), opts.MaxLineBytes)
+
+	lineNo := 0
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return nil
+		}
+		raw := scanner.Text()
+		lineNo++
+
+		ts, line := parseTimestamp(raw)
+		if onLine != nil {
+			onLine(ts)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case out <- detect.LogLine{
+			Namespace: t.Namespace,
+			Pod:       t.PodName,
+			PodUID:    t.PodUID,
+			Container: t.Container,
+			Node:      t.NodeName,
+			LineNo:    lineNo,
+			Timestamp: ts,
+			Line:      line,
+		}:
+		}
+	}
+	if err := scanner.Err(); err != nil && err != io.EOF {
+		// Cancelled streams routinely surface as scan errors; suppress those.
+		if ctx.Err() != nil {
+			return nil
+		}
+		logger.Errorf("follow scan err  %s/%s [%s]: %v",
+			t.Namespace, t.PodName, t.Container, err)
+		return fmt.Errorf("scan %s/%s[%s]: %w", t.Namespace, t.PodName, t.Container, err)
+	}
+
+	logger.Infof("follow close %s/%s [%s]  lines=%d", t.Namespace, t.PodName, t.Container, lineNo)
+	return nil
+}
+
 // CountContainers returns the total number of (pod, container) targets.
 func CountContainers(targets []PodTarget) int {
 	return len(targets)
@@ -179,5 +284,4 @@ func CountPods(targets []PodTarget) int {
 	return len(seen)
 }
 
-// Ensure metav1 import is used.
-var _ = metav1.ListOptions{}
+

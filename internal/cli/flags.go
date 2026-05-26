@@ -34,4 +34,14 @@ type Flags struct {
 
 	// Logging
 	LogLevel string // error | info | debug
+
+	// Continuous (watch) mode
+	Watch            bool          // enable rotational watch mode
+	WatchBatchSize   int           // targets per batch (concurrent streams in a window)
+	WatchWindow      time.Duration // observation window per batch
+	WatchSince       time.Duration // history fetched on first attach to a target
+	CyclePause       time.Duration // pause between batches
+	SummaryInterval  time.Duration // heartbeat summary cadence on stderr (0 = off)
+	StateFile        string        // persisted dedup file (NDJSON)
+	StateDisabled    bool          // skip persistence
 }

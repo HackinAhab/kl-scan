@@ -89,6 +89,11 @@ type Summary struct {
 	PodsWithFindings int
 	DurationSeconds  float64
 	StreamErrors     int
+
+	// Continuous-mode fields. Heartbeat=true marks an interim summary; Cycle
+	// is the rotation cycle the heartbeat was emitted in (0 in one-shot mode).
+	Heartbeat bool
+	Cycle     int
 }
 
 // WriteSummary prints the summary; safe for concurrent callers.
@@ -106,9 +111,19 @@ func (c *ConsoleWriter) WriteSummary(s Summary) error {
 	if bd == "" {
 		bd = "0"
 	}
+
+	prefix := "Summary"
+	if s.Heartbeat {
+		if s.Cycle > 0 {
+			prefix = fmt.Sprintf("Heartbeat (cycle %d)", s.Cycle)
+		} else {
+			prefix = "Heartbeat"
+		}
+	}
+
 	_, err := fmt.Fprintf(c.w,
-		"Summary: %d findings across %d pods (%s)  \u2022  scanned %d pods / %d containers in %.1fs",
-		s.TotalFindings, s.PodsWithFindings, bd, s.PodsScanned, s.ContainersScanned, s.DurationSeconds,
+		"%s: %d findings across %d pods (%s)  \u2022  scanned %d pods / %d containers in %.1fs",
+		prefix, s.TotalFindings, s.PodsWithFindings, bd, s.PodsScanned, s.ContainersScanned, s.DurationSeconds,
 	)
 	if err != nil {
 		return err

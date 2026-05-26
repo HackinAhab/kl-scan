@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"kl-scan/internal/report"
+	"kl-scan/internal/state"
 )
 
 // LogLine is a single line of pod log output flowing into the pipeline.
@@ -32,7 +33,12 @@ type Pipeline struct {
 	redacted  bool
 	workers   int
 
+	// In-process dedup map. Used when no persistent store is configured.
 	dedupe sync.Map // key: report.DedupeKey(...) -> struct{}{}
+
+	// store, if non-nil, supersedes the in-memory dedupe map and persists
+	// dedup keys to disk (with single-instance flock semantics).
+	store *state.Store
 
 	// stats
 	statsMu          sync.Mutex
@@ -54,6 +60,12 @@ func NewPipeline(detectors []Detector, sink Sink, redacted bool, workers int) *P
 		bySeverity:       map[string]int{},
 		podsWithFindings: map[string]struct{}{},
 	}
+}
+
+// SetStore wires a persistent dedup store into the pipeline. When set, the
+// store's MarkSeen replaces the in-memory dedupe map.
+func (p *Pipeline) SetStore(s *state.Store) {
+	p.store = s
 }
 
 // Run consumes from `lines` until it is closed or ctx is cancelled.
@@ -100,9 +112,11 @@ func (p *Pipeline) processLine(ll LogLine) {
 		for _, m := range matches {
 			valHash := report.HashValue(m.Value)
 			key := report.DedupeKey(ll.PodUID, d.Name(), m.RuleID, valHash)
-			if _, loaded := p.dedupe.LoadOrStore(key, struct{}{}); loaded {
+
+			if !p.markSeen(key, ll, d.Name(), m.RuleID) {
 				continue
 			}
+
 			f := report.Finding{
 				Detector:    d.Name(),
 				RuleID:      m.RuleID,
@@ -129,6 +143,26 @@ func (p *Pipeline) processLine(ll LogLine) {
 			p.sink.Emit(f)
 		}
 	}
+}
+
+// markSeen returns true if the (key) is new and the caller should emit the
+// finding. Uses the persistent store if configured, otherwise the in-memory
+// sync.Map.
+func (p *Pipeline) markSeen(key string, ll LogLine, detector, ruleID string) bool {
+	if p.store != nil {
+		isNew, _ := p.store.MarkSeen(state.Record{
+			Key:       key,
+			Namespace: ll.Namespace,
+			Pod:       ll.Pod,
+			Container: ll.Container,
+			Detector:  detector,
+			Rule:      ruleID,
+			First:     time.Now().UTC(),
+		})
+		return isNew
+	}
+	_, loaded := p.dedupe.LoadOrStore(key, struct{}{})
+	return !loaded
 }
 
 func (p *Pipeline) recordStats(pod, severity string) {

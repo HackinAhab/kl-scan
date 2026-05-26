@@ -1,6 +1,8 @@
 # kl-scan
 
-One-shot Kubernetes pod log auditor for penetration testing. Streams current logs from all matching pods and detects secrets, API keys, tokens, and other sensitive values using pluggable detection engines. 
+Kubernetes pod log auditor for penetration testing. Streams logs from matching pods and detects secrets, API keys, tokens, and other sensitive values using pluggable detection engines.
+
+By default kl-scan does a one-shot scan of historical logs. Pass `--watch` to keep it running continuously throughout an engagement, rotating through the pod set in batches so brief windows of secret exposure aren't missed.
 
 > This tool is almost entirely vibe coded, use at your own risk.
 
@@ -46,6 +48,16 @@ Output:
 Auth:
       --kubeconfig string      Path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)
       --context string         Kubeconfig context override
+
+Continuous (watch) mode:
+      --watch                       Run continuously until cancelled
+      --watch-batch-size int        Targets streamed concurrently per batch (default 50)
+      --watch-window duration       Observation window per batch (default 1m)
+      --watch-since duration        History fetched on first attach to a target (default 30s)
+      --cycle-pause duration        Pause between batches (default 1s)
+      --summary-interval duration   Heartbeat summary cadence on stderr (default 5m; 0=off)
+      --state-file string           Persisted dedup file (default ./kl-scan-state.ndjson)
+      --state-disabled              Skip persistence; in-memory dedup only
 ```
 
 ## Examples
@@ -71,7 +83,67 @@ kl-scan --rules ./my-rules.toml
 
 # Scan with higher concurrency for large clusters
 kl-scan -A --max-streams 100 --max-workers 16
+
+# Continuous watch: rotate through all pods in prod, 50 at a time, 60s each
+kl-scan -n prod --watch
+
+# Tighter rotation for a small fleet (everything observed every minute)
+kl-scan -l app=api --watch --watch-batch-size 20 --watch-window 30s
+
+# Continuous run with NDJSON output to a file, heartbeat every 2 minutes
+kl-scan -A --watch --output json --out findings.ndjson --summary-interval 2m
 ```
+
+## Continuous (watch) mode
+
+`--watch` keeps kl-scan running until you cancel it (Ctrl-C / SIGTERM). Instead of holding open a long-lived stream against every pod — which scales poorly past a few hundred pods — kl-scan rotates through the pod set:
+
+1. A k8s informer maintains a live view of running pod containers (handles new pods and terminated pods automatically).
+2. kl-scan picks `--watch-batch-size` uncovered targets (default 50).
+3. It streams them with `follow=true` for `--watch-window` (default 60s).
+4. The batch is closed; targets are marked covered for this cycle.
+5. Repeat until every target has been covered, then reset and start the next cycle.
+
+### Coverage tradeoff
+
+Per-target observation per cycle is fixed at one `--watch-window`. The fraction of time any given target is being observed depends on the cluster size:
+
+| Targets | Batch | Window | Cycle ≈ | Coverage |
+|---|---|---|---|---|
+| 50  | 50 | 60s | 60s  | 100% |
+| 200 | 50 | 60s | ~4m  | 25%  |
+| 1000| 50 | 60s | ~20m | 5%   |
+| 5000| 50 | 60s | ~100m| 1%   |
+
+A *recurring* leak (something that prints credentials repeatedly) is caught within at most one cycle. A *one-shot* leak is caught with probability ≈ coverage. To increase coverage: scope with `--namespace` / `--selector`, raise `--watch-batch-size`, or lower `--watch-window`.
+
+kl-scan logs the predicted coverage at startup and warns if it falls below 5%.
+
+### Dedup state
+
+Findings are deduped using `<podUID>|<detector>|<rule>|sha256(value)`. In watch mode this set is persisted to `./kl-scan-state.ndjson` (configurable via `--state-file`) so the same secret in the same `(pod, container, rule)` is reported once and not re-flooded on every rotation. The state file is append-only — already-seen keys are never rewritten.
+
+A pod restart produces a new `PodUID`, which legitimately re-fires findings (you want to know the secret is still present after a redeploy).
+
+### Single instance
+
+The state file is protected by an exclusive `flock`. Trying to start a second kl-scan against the same state file aborts with a clear error. Use `--state-file` to point at a different path or `--state-disabled` to skip persistence entirely.
+
+### Heartbeat summaries
+
+`--summary-interval` (default 5m, `0` to disable) prints an interim summary to **stderr** showing total findings, severity breakdown, current cycle, and target count. The final summary is emitted on shutdown.
+
+### Pod lifecycle
+
+The informer reacts to pod ADD / UPDATE / DELETE events:
+
+- New pods that match the selectors are added to the rotation automatically.
+- Terminated pods are removed; in-flight streams to them end naturally.
+- Pods that fail to stream more than 3 times in a cycle are skipped for that cycle and retried on the next one.
+
+### Exit codes (watch mode)
+
+Same as one-shot mode (see [Exit Codes](#exit-codes) below). Watch mode exits only on signal, not after a single pass.
 
 ## Output
 
