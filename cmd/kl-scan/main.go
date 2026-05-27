@@ -24,6 +24,8 @@ import (
 
 	// Side-effect: registers the betterleaks detector.
 	_ "kl-scan/internal/detect/betterleaks"
+	// Side-effect: registers the trufflehog detector.
+	_ "kl-scan/internal/detect/trufflehog"
 )
 
 var version = "0.2.0"

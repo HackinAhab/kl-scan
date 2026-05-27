@@ -1,16 +1,16 @@
 # kl-scan
 
-Kubernetes pod log auditor for penetration testing. Streams logs from matching pods and detects secrets, API keys, tokens, and other sensitive values using pluggable detection engines.
+Kubernetes pod log auditor for penetration testing. Streams logs from matching pods and detects secrets, API keys, tokens, and other sensitive values using either the [betterleaks](https://github.com/) detection engine (the actively-maintained successor to gitleaks) or [Trufflehog](https://github.com/trufflesecurity/trufflehog), or both. Trufflehog runs with verification explicitly disabled — kl-scan never makes outbound API calls to validate live secrets.
 
 By default kl-scan does a one-shot scan of historical logs. Pass `--watch` to keep it running continuously throughout an engagement, rotating through the pod set in batches so brief windows of secret exposure aren't missed.
 
-> This tool is almost entirely vibe coded, use at your own risk.
+> This tool was made with heavy usage of AI assistance. 
 
 ## Install
 
 ```bash
 # Build locally
-make build
+just build
 # Binary at bin/kl-scan
 
 # Or run directly
@@ -34,8 +34,8 @@ Log scope:
       --max-line-bytes int     Skip lines longer than this in bytes (default 65536)
 
 Detection:
-      --detectors strings      Detectors to enable (default [betterleaks])
-      --rules string           Path to custom rules TOML (replaces built-in ruleset)
+      --detectors strings      Detection engines to enable (default [betterleaks]; available: betterleaks,trufflehog)
+      --rules string           Path to custom rules TOML (betterleaks only)
 
 Concurrency:
       --max-streams int        Max concurrent log streams (default 50)
@@ -80,6 +80,12 @@ kl-scan -A --redacted
 
 # Use a custom betterleaks rules file
 kl-scan --rules ./my-rules.toml
+
+# Run both detection engines (betterleaks + trufflehog, deduped per finding)
+kl-scan -A --detectors betterleaks,trufflehog
+
+# Trufflehog only
+kl-scan -A --detectors trufflehog
 
 # Scan with higher concurrency for large clusters
 kl-scan -A --max-streams 100 --max-workers 16
@@ -190,9 +196,15 @@ rules:
   verbs: [get]
 ```
 
-## Detectors
+## Detection
 
-kl-scan uses a pluggable detector interface. The default detector is **betterleaks** (the actively-maintained successor to gitleaks, written by the original gitleaks author), which covers:
+kl-scan ships with two detection engines. Either or both can be enabled per
+run via `--detectors` (default: `betterleaks`).
+
+### betterleaks (default)
+
+The actively-maintained successor to gitleaks, written by the original
+gitleaks author. The bundled default ruleset covers:
 
 - AWS access/secret keys
 - GCP service account JSON
@@ -204,19 +216,61 @@ kl-scan uses a pluggable detector interface. The default detector is **betterlea
 - Private key headers (RSA, EC, etc.)
 - And 200+ more rules from the betterleaks default ruleset
 
-To override the built-in ruleset, pass a custom betterleaks-format TOML file via `--rules`. Note: betterleaks uses CEL expressions for allowlists/filters; basic gitleaks v8 TOML rule blocks (`[[rules]]` with `id`, `regex`, `keywords`) are still compatible, but `[[rules.allowlist]]` blocks are not.
+To override the built-in ruleset, pass a custom betterleaks-format TOML file
+via `--rules`. Note: betterleaks uses CEL expressions for allowlists/filters;
+basic gitleaks v8 TOML rule blocks (`[[rules]]` with `id`, `regex`, `keywords`)
+are still compatible, but `[[rules.allowlist]]` blocks are not.
 
-## Adding a Detector (v0.2+)
+### trufflehog
 
-Implement the `detect.Detector` interface and register it:
+[Trufflehog](https://github.com/trufflesecurity/trufflehog)'s ~800 default
+detectors are also bundled. Enable them with `--detectors trufflehog` or
+run both engines simultaneously with `--detectors betterleaks,trufflehog`.
 
-```go
-// In your detector package:
-func init() {
-    detect.Register("mydetector", func(rulesPath string) (detect.Detector, error) {
-        return &MyDetector{}, nil
-    })
-}
+```bash
+# trufflehog only
+kl-scan -A --detectors trufflehog
+
+# both engines, deduped per (pod, rule, secret)
+kl-scan -A --detectors betterleaks,trufflehog
 ```
 
-Then enable it with `--detectors betterleaks,mydetector`.
+**Verification is permanently disabled.** Trufflehog's headline feature is
+active credential validation against provider APIs (AWS, GitHub, Stripe,
+etc.). kl-scan hardcodes `verify=false` on every detector call — the tool
+will never make outbound API calls to validate live secrets, and there is
+no flag to enable it. This is intentional for pentest engagements: outbound
+validation creates audit trails on the target's third-party accounts and
+may exceed engagement scope.
+
+**Decoders.** Trufflehog also includes decoders that surface secrets buried
+in encoded text. kl-scan applies the following per log line, single-pass
+(no chaining):
+
+- Base64 — catches secrets in `Authorization: Basic ...`, dumped k8s
+  Secrets, encoded request/response bodies.
+- UTF-16 — Windows containers and some .NET workloads emit UTF-16.
+- Escaped Unicode (`\u00xx`) — common output from JSON loggers that
+  escape non-ASCII bytes.
+
+The HTML decoder is intentionally excluded; it is feature-gated off in
+Trufflehog itself and adds no value for log streams.
+
+**Caveats.**
+
+- kl-scan is line-oriented. Multi-line secrets (e.g. a full PEM block
+  spread across several log lines) will not reassemble across lines.
+- The `--rules` flag applies only to betterleaks. Trufflehog uses its
+  built-in detector set unconditionally; custom-detector YAML support is
+  not exposed in the current adapter.
+- Each line is run through a keyword pre-filter (Aho-Corasick) before
+  detector regex evaluation, but per-line CPU cost is still meaningfully
+  higher than betterleaks. For large clusters consider scoping with
+  `--namespace` / `--selector`.
+
+### Detector dedup
+
+When both engines are enabled, the same secret found by both will appear
+as two findings (one per detector). The dedup key is
+`<podUID>|<detector>|<rule>|sha256(value)`, so an operator can compare
+engine coverage without per-engine flooding.
