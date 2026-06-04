@@ -19,6 +19,7 @@ const (
 	LevelError Level = iota // default: only errors; klog output suppressed
 	LevelInfo               // info: stream start/end messages to stderr
 	LevelDebug              // debug: full klog output (client-go requests, throttle, etc.)
+	LevelTrace              // trace: every raw/parsed line and window operation
 )
 
 // L is the package-level logger used across kl-scan.
@@ -55,6 +56,10 @@ func Init(levelStr string) error {
 		// Let klog write to stderr at full verbosity so the user sees
 		// client-go request/throttle details.
 		klog.SetOutput(os.Stderr)
+
+	case LevelTrace:
+		// Trace implies full klog output as well.
+		klog.SetOutput(os.Stderr)
 	}
 
 	return nil
@@ -68,6 +73,11 @@ func Infof(format string, args ...any) {
 // Debugf logs a formatted message at debug level.
 func Debugf(format string, args ...any) {
 	L.Debugf(format, args...)
+}
+
+// Tracef logs a formatted message at trace level.
+func Tracef(format string, args ...any) {
+	L.Tracef(format, args...)
 }
 
 // Errorf logs a formatted message at error level (always emitted).
@@ -84,6 +94,12 @@ func (l *Logger) Infof(format string, args ...any) {
 func (l *Logger) Debugf(format string, args ...any) {
 	if l.level >= LevelDebug {
 		l.write("DEBUG", format, args...)
+	}
+}
+
+func (l *Logger) Tracef(format string, args ...any) {
+	if l.level >= LevelTrace {
+		l.write("TRACE", format, args...)
 	}
 }
 
@@ -105,7 +121,9 @@ func parse(s string) (Level, error) {
 		return LevelInfo, nil
 	case "debug":
 		return LevelDebug, nil
+	case "trace":
+		return LevelTrace, nil
 	default:
-		return LevelError, fmt.Errorf("unknown log level %q; valid values: error, info, debug", s)
+		return LevelError, fmt.Errorf("unknown log level %q; valid values: error, info, debug, trace", s)
 	}
 }

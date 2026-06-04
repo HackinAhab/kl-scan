@@ -101,6 +101,7 @@ func streamOne(
 	scanner := bufio.NewScanner(stream)
 	scanner.Buffer(make([]byte, cfg.MaxLineBytes), cfg.MaxLineBytes)
 
+	w := newLineWindow(windowCapLines, windowCapBytes)
 	lineNo := 0
 	for scanner.Scan() {
 		if ctx.Err() != nil {
@@ -109,12 +110,13 @@ func streamOne(
 		raw := scanner.Text()
 		lineNo++
 
+		logger.Tracef("raw line  %s/%s [%s] line=%d  raw=%q", t.Namespace, t.PodName, t.Container, lineNo, raw)
+
 		ts, line := parseTimestamp(raw)
 
-		select {
-		case <-ctx.Done():
-			return nil
-		case out <- detect.LogLine{
+		logger.Tracef("parsed    %s/%s [%s] line=%d  ts=%s  payload=%q", t.Namespace, t.PodName, t.Container, lineNo, ts.Format("15:04:05.000000000"), line)
+
+		if err := emitWithWindow(ctx, out, detect.LogLine{
 			Namespace: t.Namespace,
 			Pod:       t.PodName,
 			PodUID:    t.PodUID,
@@ -123,7 +125,8 @@ func streamOne(
 			LineNo:    lineNo,
 			Timestamp: ts,
 			Line:      line,
-		}:
+		}, w); err != nil {
+			return nil
 		}
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
@@ -228,6 +231,7 @@ func StreamOneFollow(
 	scanner := bufio.NewScanner(stream)
 	scanner.Buffer(make([]byte, opts.MaxLineBytes), opts.MaxLineBytes)
 
+	w := newLineWindow(windowCapLines, windowCapBytes)
 	lineNo := 0
 	for scanner.Scan() {
 		if ctx.Err() != nil {
@@ -236,15 +240,16 @@ func StreamOneFollow(
 		raw := scanner.Text()
 		lineNo++
 
+		logger.Tracef("raw line (follow)  %s/%s [%s] line=%d  raw=%q", t.Namespace, t.PodName, t.Container, lineNo, raw)
+
 		ts, line := parseTimestamp(raw)
 		if onLine != nil {
 			onLine(ts)
 		}
 
-		select {
-		case <-ctx.Done():
-			return nil
-		case out <- detect.LogLine{
+		logger.Tracef("parsed (follow)    %s/%s [%s] line=%d  ts=%s  payload=%q", t.Namespace, t.PodName, t.Container, lineNo, ts.Format("15:04:05.000000000"), line)
+
+		if err := emitWithWindow(ctx, out, detect.LogLine{
 			Namespace: t.Namespace,
 			Pod:       t.PodName,
 			PodUID:    t.PodUID,
@@ -253,7 +258,8 @@ func StreamOneFollow(
 			LineNo:    lineNo,
 			Timestamp: ts,
 			Line:      line,
-		}:
+		}, w); err != nil {
+			return nil
 		}
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {

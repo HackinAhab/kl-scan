@@ -33,7 +33,7 @@ type Flags struct {
 	Context    string
 
 	// Logging
-	LogLevel string // error | info | debug
+	LogLevel string // error | info | debug | trace
 
 	// Continuous (watch) mode
 	Watch            bool          // enable rotational watch mode

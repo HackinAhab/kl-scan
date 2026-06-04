@@ -85,7 +85,7 @@ deduped on disk so the same secret is not reported repeatedly within a run.`,
 	fl.StringVar(&f.Context, "context", "", "kubeconfig context to use")
 
 	// Logging
-	fl.StringVar(&f.LogLevel, "log", "error", "log level: error|info|debug")
+	fl.StringVar(&f.LogLevel, "log", "error", "log level: error|info|debug|trace")
 
 	// Continuous (watch) mode
 	fl.BoolVar(&f.Watch, "watch", false, "run continuously: rotate through pods in batches until cancelled")
