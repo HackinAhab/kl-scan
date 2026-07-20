@@ -3,6 +3,7 @@ package betterleaks
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -42,18 +43,9 @@ func New(rulesPath string) (detect.Detector, error) {
 // newFromDefault constructs a Detector from the embedded default TOML with
 // validation explicitly disabled.
 func newFromDefault() (*bldetect.Detector, error) {
-	viper.Reset()
-	viper.SetConfigType("toml")
-	if err := viper.ReadConfig(strings.NewReader(blconfig.DefaultConfig)); err != nil {
-		return nil, fmt.Errorf("read default config: %w", err)
-	}
-	var vc blconfig.ViperConfig
-	if err := viper.Unmarshal(&vc); err != nil {
-		return nil, fmt.Errorf("unmarshal default config: %w", err)
-	}
-	cfg, err := vc.Translate()
+	cfg, err := parseTOMLConfig(strings.NewReader(blconfig.DefaultConfig))
 	if err != nil {
-		return nil, fmt.Errorf("translate default config: %w", err)
+		return nil, fmt.Errorf("default config: %w", err)
 	}
 	// Apply kl-scan-specific overrides to the embedded ruleset BEFORE the
 	// detector is constructed, because NewDetectorContext compiles each
@@ -105,20 +97,30 @@ func newFromPath(path string) (*bldetect.Detector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read rules file %q: %w", path, err)
 	}
+	cfg, err := parseTOMLConfig(strings.NewReader(string(data)))
+	if err != nil {
+		return nil, fmt.Errorf("rules file %q: %w", path, err)
+	}
+	return bldetect.NewDetectorContext(context.Background(), cfg, bldetect.ValidationOptions{}), nil
+}
+
+// parseTOMLConfig parses a betterleaks TOML ruleset via viper and translates
+// it into the internal config form shared by the default and custom paths.
+func parseTOMLConfig(r io.Reader) (*blconfig.Config, error) {
 	viper.Reset()
 	viper.SetConfigType("toml")
-	if err := viper.ReadConfig(strings.NewReader(string(data))); err != nil {
-		return nil, fmt.Errorf("parse rules file %q: %w", path, err)
+	if err := viper.ReadConfig(r); err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
 	}
 	var vc blconfig.ViperConfig
 	if err := viper.Unmarshal(&vc); err != nil {
-		return nil, fmt.Errorf("unmarshal rules file %q: %w", path, err)
+		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 	cfg, err := vc.Translate()
 	if err != nil {
-		return nil, fmt.Errorf("translate rules file %q: %w", path, err)
+		return nil, fmt.Errorf("translate config: %w", err)
 	}
-	return bldetect.NewDetectorContext(context.Background(), cfg, bldetect.ValidationOptions{}), nil
+	return cfg, nil
 }
 
 // Name implements detect.Detector.

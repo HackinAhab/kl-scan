@@ -123,14 +123,6 @@ func Open(path string, disabled bool) (*Store, error) {
 	return s, nil
 }
 
-// Path returns the on-disk path (empty string if disabled).
-func (s *Store) Path() string {
-	if s.disabled {
-		return ""
-	}
-	return s.path
-}
-
 // SeenCount returns the number of unique dedup keys known to the store.
 func (s *Store) SeenCount() int {
 	s.mu.Lock()

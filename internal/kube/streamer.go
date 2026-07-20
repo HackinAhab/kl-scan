@@ -24,6 +24,10 @@ type StreamConfig struct {
 	MaxStreams   int   // semaphore capacity
 }
 
+// WatermarkCallback is invoked with the target and parsed timestamp of each
+// log line during streaming, allowing callers to track per-target watermarks.
+type WatermarkCallback func(target PodTarget, ts time.Time)
+
 const defaultMaxLineBytes = 65536
 
 // StreamAll opens a log stream for each target concurrently (up to
@@ -36,6 +40,31 @@ func StreamAll(
 	targets []PodTarget,
 	cfg StreamConfig,
 	out chan<- detect.LogLine,
+) (streamErrors int) {
+	return streamAll(ctx, client, targets, cfg, out, nil)
+}
+
+// StreamAllWithWatermarks is like StreamAll but invokes onLine for every
+// parsed log line with the target and its timestamp, allowing callers to
+// track per-target high watermarks during the sweep.
+func StreamAllWithWatermarks(
+	ctx context.Context,
+	client *Client,
+	targets []PodTarget,
+	cfg StreamConfig,
+	out chan<- detect.LogLine,
+	onLine WatermarkCallback,
+) (streamErrors int) {
+	return streamAll(ctx, client, targets, cfg, out, onLine)
+}
+
+func streamAll(
+	ctx context.Context,
+	client *Client,
+	targets []PodTarget,
+	cfg StreamConfig,
+	out chan<- detect.LogLine,
+	onLine WatermarkCallback,
 ) (streamErrors int) {
 	if cfg.MaxLineBytes <= 0 {
 		cfg.MaxLineBytes = defaultMaxLineBytes
@@ -52,16 +81,14 @@ func StreamAll(
 	for i := range targets {
 		t := targets[i]
 		g.Go(func() error {
-			if err := streamOne(gctx, client, t, cfg, out); err != nil {
+			if err := streamOne(gctx, client, t, cfg, out, onLine); err != nil {
 				errCnt.Add(1)
 			}
-			// Always return nil so errgroup does not cancel the context on the
-			// first stream error — we want best-effort across all targets.
 			return nil
 		})
 	}
 
-	_ = g.Wait() // never errors (goroutines always return nil)
+	_ = g.Wait()
 	return int(errCnt.Load())
 }
 
@@ -71,6 +98,7 @@ func streamOne(
 	t PodTarget,
 	cfg StreamConfig,
 	out chan<- detect.LogLine,
+	onLine WatermarkCallback,
 ) error {
 	opts := &corev1.PodLogOptions{
 		Container:  t.Container,
@@ -113,6 +141,10 @@ func streamOne(
 		logger.Tracef("raw line  %s/%s [%s] line=%d  raw=%q", t.Namespace, t.PodName, t.Container, lineNo, raw)
 
 		ts, line := parseTimestamp(raw)
+
+		if onLine != nil {
+			onLine(t, ts)
+		}
 
 		logger.Tracef("parsed    %s/%s [%s] line=%d  ts=%s  payload=%q", t.Namespace, t.PodName, t.Container, lineNo, ts.Format("15:04:05.000000000"), line)
 

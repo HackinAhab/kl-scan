@@ -50,10 +50,3 @@ func available() []string {
 	sort.Strings(names)
 	return names
 }
-
-// Available returns the registered detector names (sorted).
-func Available() []string {
-	regMu.RLock()
-	defer regMu.RUnlock()
-	return available()
-}

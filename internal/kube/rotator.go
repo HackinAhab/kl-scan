@@ -24,17 +24,6 @@ type RotatorConfig struct {
 	MaxBatchFailures int
 }
 
-// CycleEvent is emitted on each cycle boundary for callers that want to react
-// (e.g. emit a heartbeat).
-type CycleEvent struct {
-	Cycle           int
-	StartedAt       time.Time
-	CompletedAt     time.Time
-	Targets         int     // total live targets at cycle completion
-	BatchesRun      int     // batches in this cycle
-	CoverageWindow  time.Duration
-}
-
 // Rotator drives the rotational watch loop.
 //
 // Each iteration:
@@ -65,9 +54,6 @@ type Rotator struct {
 	streamErrors atomic.Int32
 	cycleNum     atomic.Int32
 	batchNum     atomic.Int32
-
-	// onCycleComplete, if set, is invoked at the end of every cycle.
-	onCycleComplete func(CycleEvent)
 }
 
 // NewRotator constructs a Rotator. Apply defaults for any unset fields.
@@ -98,9 +84,17 @@ func NewRotator(client *Client, idx *TargetIndex, cfg RotatorConfig, out chan<- 
 	}
 }
 
-// SetOnCycleComplete registers a callback invoked when each cycle finishes.
-func (r *Rotator) SetOnCycleComplete(fn func(CycleEvent)) {
-	r.onCycleComplete = fn
+// SeedWatermarks merges pre-computed watermarks (e.g. from an initial sweep)
+// into the rotator's map. Must be called before Run. Targets with seeded
+// watermarks will resume from watermark+1ns on first attach.
+func (r *Rotator) SeedWatermarks(wm map[TargetKey]time.Time) {
+	r.wmMu.Lock()
+	defer r.wmMu.Unlock()
+	for k, ts := range wm {
+		if existing, ok := r.watermarks[k]; !ok || ts.After(existing) {
+			r.watermarks[k] = ts
+		}
+	}
 }
 
 // StreamErrors returns the cumulative count of stream errors observed across
@@ -164,19 +158,8 @@ func (r *Rotator) Run(ctx context.Context) {
 
 		// Cycle complete?
 		if len(uncovered) == 0 {
-			ev := CycleEvent{
-				Cycle:          int(r.cycleNum.Load()),
-				StartedAt:      cycleStart,
-				CompletedAt:    time.Now(),
-				Targets:        len(liveSet),
-				BatchesRun:     batchesThisCycle,
-				CoverageWindow: r.cfg.Window,
-			}
 			logger.Infof("cycle complete  cycle=%d  targets=%d  batches=%d  duration=%.1fs",
-				ev.Cycle, ev.Targets, ev.BatchesRun, ev.CompletedAt.Sub(ev.StartedAt).Seconds())
-			if r.onCycleComplete != nil {
-				r.onCycleComplete(ev)
-			}
+				r.cycleNum.Load(), len(liveSet), batchesThisCycle, time.Since(cycleStart).Seconds())
 			// Reset for next cycle.
 			r.covered = make(map[TargetKey]struct{})
 			r.failCounts = make(map[TargetKey]int)

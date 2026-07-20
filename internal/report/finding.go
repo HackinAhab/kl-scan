@@ -44,14 +44,5 @@ func HashValue(v string) string {
 
 // DedupeKey returns the per-pod dedupe key tuple as a string.
 func DedupeKey(podUID, detector, ruleID, valueHash string) string {
-	var b strings.Builder
-	b.Grow(len(podUID) + len(detector) + len(ruleID) + len(valueHash) + 3)
-	b.WriteString(podUID)
-	b.WriteByte('|')
-	b.WriteString(detector)
-	b.WriteByte('|')
-	b.WriteString(ruleID)
-	b.WriteByte('|')
-	b.WriteString(valueHash)
-	return b.String()
+	return strings.Join([]string{podUID, detector, ruleID, valueHash}, "|")
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -92,6 +93,7 @@ deduped on disk so the same secret is not reported repeatedly within a run.`,
 	fl.IntVar(&f.WatchBatchSize, "watch-batch-size", 50, "targets streamed concurrently per batch (watch mode)")
 	fl.DurationVar(&f.WatchWindow, "watch-window", 60*time.Second, "observation window per batch (watch mode)")
 	fl.DurationVar(&f.WatchSince, "watch-since", 30*time.Second, "history fetched on first attach to a target (watch mode)")
+	fl.DurationVar(&f.WatchInitSince, "watch-init-since", time.Hour, "lookback for initial sweep of all pods before rotation begins (watch mode; 0 = skip)")
 	fl.DurationVar(&f.CyclePause, "cycle-pause", time.Second, "pause between batches (watch mode; 0 = no pause)")
 	fl.DurationVar(&f.SummaryInterval, "summary-interval", 5*time.Minute, "heartbeat summary cadence on stderr (watch mode; 0 = off)")
 	fl.StringVar(&f.StateFile, "state-file", "./kl-scan-state.ndjson", "persisted dedup file (watch mode)")
@@ -239,6 +241,17 @@ func runOnce(ctx context.Context, rt *runtimeCtx) error {
 	return nil
 }
 
+// clampBatch bounds a requested batch size to [1, maxStreams].
+func clampBatch(batch, maxStreams int) int {
+	if batch > maxStreams {
+		batch = maxStreams
+	}
+	if batch < 1 {
+		batch = 1
+	}
+	return batch
+}
+
 // runWatch is the rotational continuous-watch path.
 func runWatch(ctx context.Context, rt *runtimeCtx) error {
 	start := time.Now()
@@ -293,21 +306,37 @@ func runWatch(ctx context.Context, rt *runtimeCtx) error {
 		return fmt.Errorf("informer cache failed to sync within 60s")
 	}
 
+	// Wait briefly for targets to appear (informer may still be processing events).
 	initialTargets := idx.Snapshot()
+	if len(initialTargets) == 0 {
+		fmt.Fprintf(os.Stderr, "kl-scan: waiting for pods to appear...\n")
+		deadline := time.After(30 * time.Second)
+	waitLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-deadline:
+				break waitLoop
+			case <-time.After(500 * time.Millisecond):
+				initialTargets = idx.Snapshot()
+				if len(initialTargets) > 0 {
+					break waitLoop
+				}
+			}
+		}
+	}
+
 	if len(initialTargets) == 0 {
 		fmt.Fprintf(os.Stderr, "kl-scan: no running pods match selectors yet; will continue watching\n")
 	} else {
 		// Coverage prediction.
-		batch := f.WatchBatchSize
-		if batch > f.MaxStreams {
+		if f.WatchBatchSize > f.MaxStreams {
 			fmt.Fprintf(os.Stderr,
 				"kl-scan: warning: --watch-batch-size (%d) exceeds --max-streams (%d); clamping to %d\n",
-				batch, f.MaxStreams, f.MaxStreams)
-			batch = f.MaxStreams
+				f.WatchBatchSize, f.MaxStreams, f.MaxStreams)
 		}
-		if batch < 1 {
-			batch = 1
-		}
+		batch := clampBatch(f.WatchBatchSize, f.MaxStreams)
 		nTargets := len(initialTargets)
 		batches := int(math.Ceil(float64(nTargets) / float64(batch)))
 		cycleDur := time.Duration(batches)*f.WatchWindow + time.Duration(batches)*f.CyclePause
@@ -327,22 +356,61 @@ func runWatch(ctx context.Context, rt *runtimeCtx) error {
 		}
 	}
 
-	// 4. Build rotator.
-	clampedBatch := f.WatchBatchSize
-	if clampedBatch > f.MaxStreams {
-		clampedBatch = f.MaxStreams
+	// 4. Initial deep sweep (if configured).
+	logger.Debugf("sweep check: WatchInitSince=%s  initialTargets=%d", f.WatchInitSince, len(initialTargets))
+	var initWatermarks map[kube.TargetKey]time.Time
+	if f.WatchInitSince > 0 && len(initialTargets) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"kl-scan: initial sweep of %d targets (lookback=%s)...\n",
+			len(initialTargets), f.WatchInitSince)
+
+		sweepLineCh := make(chan detect.LogLine, 4096)
+
+		var wmMu sync.Mutex
+		initWatermarks = make(map[kube.TargetKey]time.Time, len(initialTargets))
+
+		sweepDone := make(chan struct{})
+		go func() {
+			defer close(sweepDone)
+			rt.pipeline.Run(ctx, sweepLineCh)
+		}()
+
+		sweepErrs := kube.StreamAllWithWatermarks(ctx, rt.client, initialTargets, kube.StreamConfig{
+			SinceSeconds: kube.SinceToSeconds(f.WatchInitSince),
+			TailLines:    0,
+			MaxLineBytes: f.MaxLineBytes,
+			MaxStreams:   f.MaxStreams,
+		}, sweepLineCh, func(t kube.PodTarget, ts time.Time) {
+			key := kube.TargetKeyOf(t)
+			wmMu.Lock()
+			if ts.After(initWatermarks[key]) {
+				initWatermarks[key] = ts
+			}
+			wmMu.Unlock()
+		})
+		close(sweepLineCh)
+		<-sweepDone
+
+		if sweepErrs > 0 {
+			fmt.Fprintf(os.Stderr, "kl-scan: initial sweep done (%d stream errors)\n", sweepErrs)
+		} else {
+			fmt.Fprintf(os.Stderr, "kl-scan: initial sweep done\n")
+		}
 	}
-	if clampedBatch < 1 {
-		clampedBatch = 1
-	}
+
+	// 5. Build rotator.
 	lineCh := make(chan detect.LogLine, 4096)
 	rotator := kube.NewRotator(rt.client, idx, kube.RotatorConfig{
-		BatchSize:    clampedBatch,
+		BatchSize:    clampBatch(f.WatchBatchSize, f.MaxStreams),
 		Window:       f.WatchWindow,
 		CyclePause:   f.CyclePause,
 		WatchSince:   f.WatchSince,
 		MaxLineBytes: f.MaxLineBytes,
 	}, lineCh)
+
+	if initWatermarks != nil {
+		rotator.SeedWatermarks(initWatermarks)
+	}
 
 	rotatorDone := make(chan struct{})
 	go func() {
@@ -501,9 +569,15 @@ func (s *ndjsonSink) WriteSummary(sum report.Summary) {
 func buildSink(f cli.Flags) (outputSink, func(), error) {
 	var fileWriter io.WriteCloser
 	if f.Out != "" {
-		fh, err := os.Create(f.Out)
+		var fh *os.File
+		var err error
+		if f.Watch {
+			fh, err = os.OpenFile(f.Out, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+		} else {
+			fh, err = os.Create(f.Out)
+		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("create output file %q: %w", f.Out, err)
+			return nil, nil, fmt.Errorf("open output file %q: %w", f.Out, err)
 		}
 		fileWriter = fh
 		fmt.Fprintf(os.Stderr, "kl-scan: writing output to %s\n", f.Out)

@@ -144,17 +144,6 @@ func (i *TargetIndex) Snapshot() []PodTarget {
 	return out
 }
 
-// LiveKeys returns the set of TargetKeys currently in the index.
-func (i *TargetIndex) LiveKeys() map[TargetKey]struct{} {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	out := make(map[TargetKey]struct{}, len(i.targets))
-	for k := range i.targets {
-		out[k] = struct{}{}
-	}
-	return out
-}
-
 // --- event handlers ---------------------------------------------------------
 
 func (i *TargetIndex) onAdd(obj any) {
