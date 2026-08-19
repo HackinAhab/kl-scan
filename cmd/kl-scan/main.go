@@ -58,7 +58,7 @@ deduped on disk so the same secret is not reported repeatedly within a run.`,
 	fl := root.Flags()
 
 	// Pod selection
-	fl.StringVarP(&f.Namespace, "namespace", "n", "", "target namespace (default: current context namespace)")
+	fl.StringSliceVarP(&f.Namespaces, "namespace", "n", nil, "target namespaces, comma-separated (default: current context namespace)")
 	fl.BoolVarP(&f.AllNamespaces, "all-namespaces", "A", false, "scan across all namespaces")
 	fl.StringVarP(&f.Selector, "selector", "l", "", "label selector (e.g. app=api)")
 	fl.StringVar(&f.FieldSelector, "field-selector", "", "field selector (e.g. status.phase=Running)")
@@ -140,7 +140,7 @@ func setup(f cli.Flags) (*runtimeCtx, error) {
 	client, err := kube.NewClient(kube.Config{
 		KubeconfigPath: f.Kubeconfig,
 		ContextName:    f.Context,
-		Namespace:      f.Namespace,
+		Namespaces:     f.Namespaces,
 		AllNamespaces:  f.AllNamespaces,
 	})
 	if err != nil {
@@ -166,6 +166,9 @@ func setup(f cli.Flags) (*runtimeCtx, error) {
 
 // runScan dispatches to one-shot or watch mode based on flags.
 func runScan(ctx context.Context, f cli.Flags) error {
+	if len(f.Namespaces) > 0 && f.AllNamespaces {
+		return fmt.Errorf("--namespace and --all-namespaces are mutually exclusive")
+	}
 	rt, err := setup(f)
 	if err != nil {
 		return err
@@ -184,7 +187,7 @@ func runOnce(ctx context.Context, rt *runtimeCtx) error {
 	f := rt.flags
 
 	targets, err := kube.DiscoverTargets(ctx, rt.client, kube.DiscoveryConfig{
-		Namespace:     rt.client.Namespace,
+		Namespaces:    rt.client.Namespaces,
 		LabelSelector: f.Selector,
 		FieldSelector: f.FieldSelector,
 	})
@@ -282,7 +285,7 @@ func runWatch(ctx context.Context, rt *runtimeCtx) error {
 
 	// 2. Build the informer-backed target index.
 	idx, err := kube.NewTargetIndex(rt.client, kube.IndexConfig{
-		Namespace:     rt.client.Namespace,
+		Namespaces:    rt.client.Namespaces,
 		LabelSelector: f.Selector,
 		FieldSelector: f.FieldSelector,
 	})

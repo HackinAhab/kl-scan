@@ -21,7 +21,7 @@ type PodTarget struct {
 
 // DiscoveryConfig controls which pods are returned.
 type DiscoveryConfig struct {
-	Namespace     string // empty = all namespaces
+	Namespaces    []string // nil/empty = all namespaces
 	LabelSelector string
 	FieldSelector string
 }
@@ -29,35 +29,40 @@ type DiscoveryConfig struct {
 // DiscoverTargets returns all (pod, container) pairs matching the given config.
 // Only Running pods are included; completed/failed/pending pods are skipped.
 func DiscoverTargets(ctx context.Context, client *Client, cfg DiscoveryConfig) ([]PodTarget, error) {
-	ns := cfg.Namespace
+	namespaces := cfg.Namespaces
+	if len(namespaces) == 0 {
+		namespaces = []string{""}
+	}
 
 	listOpts := metav1.ListOptions{
 		LabelSelector: cfg.LabelSelector,
 		FieldSelector: cfg.FieldSelector,
 	}
 
-	pods, err := client.Clientset.CoreV1().Pods(ns).List(ctx, listOpts)
-	if err != nil {
-		return nil, fmt.Errorf("list pods (namespace=%q): %w", ns, err)
-	}
-
-	logger.Debugf("list pods  namespace=%q  label=%q  field=%q  total=%d",
-		ns, cfg.LabelSelector, cfg.FieldSelector, len(pods.Items))
-
 	var targets []PodTarget
-	for i := range pods.Items {
-		p := &pods.Items[i]
-		if !isPodRunning(p) {
-			continue
+	for _, ns := range namespaces {
+		pods, err := client.Clientset.CoreV1().Pods(ns).List(ctx, listOpts)
+		if err != nil {
+			return nil, fmt.Errorf("list pods (namespace=%q): %w", ns, err)
 		}
-		for _, c := range p.Spec.Containers {
-			targets = append(targets, PodTarget{
-				Namespace: p.Namespace,
-				PodName:   p.Name,
-				PodUID:    string(p.UID),
-				NodeName:  p.Spec.NodeName,
-				Container: c.Name,
-			})
+
+		logger.Debugf("list pods  namespace=%q  label=%q  field=%q  total=%d",
+			ns, cfg.LabelSelector, cfg.FieldSelector, len(pods.Items))
+
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			if !isPodRunning(p) {
+				continue
+			}
+			for _, c := range p.Spec.Containers {
+				targets = append(targets, PodTarget{
+					Namespace: p.Namespace,
+					PodName:   p.Name,
+					PodUID:    string(p.UID),
+					NodeName:  p.Spec.NodeName,
+					Container: c.Name,
+				})
+			}
 		}
 	}
 	return targets, nil

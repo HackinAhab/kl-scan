@@ -5,7 +5,7 @@ import "time"
 // Flags holds all parsed CLI flag values.
 type Flags struct {
 	// Pod selection
-	Namespace     string
+	Namespaces    []string
 	AllNamespaces bool
 	Selector      string
 	FieldSelector string

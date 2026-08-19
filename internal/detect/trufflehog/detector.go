@@ -2,8 +2,6 @@ package trufflehog
 
 import (
 	"context"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/trufflesecurity/trufflehog/v3/pkg/decoders"
 	thdetectors "github.com/trufflesecurity/trufflehog/v3/pkg/detectors"
@@ -17,12 +15,6 @@ import (
 // Name is the registered detector identifier.
 const Name = "trufflehog"
 
-// contextSnippetMax bounds the length of the line text we attach to a
-// finding's Context field. Pod log lines can be up to --max-line-bytes
-// (65536 by default); reproducing the full line in every finding would
-// bloat output. The matched secret value is reported separately, so
-// this snippet is purely for human triage context.
-const contextSnippetMax = 200
 
 // Detector adapts the Trufflehog detector set + decoder set to the
 // kl-scan detect.Detector interface.
@@ -139,7 +131,7 @@ func (d *Detector) scanBytes(data, original []byte) []detect.Match {
 				Description: description,
 				Severity:    severity,
 				Value:       value,
-				Context:     contextSnippet(original),
+				Context:     value,
 			})
 		}
 	}
@@ -163,25 +155,3 @@ func preferredSecretValue(r thdetectors.Result) string {
 	return ""
 }
 
-// contextSnippet returns a short, single-line excerpt of the original
-// log line for human triage. Pod logs occasionally contain embedded
-// newlines or null bytes from misbehaving applications; we trim and
-// truncate so the rendered finding stays on one line.
-func contextSnippet(b []byte) string {
-	if len(b) == 0 {
-		return ""
-	}
-	s := string(b)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	if len(s) > contextSnippetMax {
-		// Trim on a UTF-8 boundary so we don't emit an invalid rune.
-		cut := contextSnippetMax
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
-		}
-		s = s[:cut] + "..."
-	}
-	return s
-}

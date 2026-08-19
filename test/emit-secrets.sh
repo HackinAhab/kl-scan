@@ -123,6 +123,40 @@ echo "Initialised GCP client with key AIzaSyxK9mN2pQ7vR4wY1zA8bC5dE0fG3hI6jL"
 log "section: JWT"
 echo "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 echo "token: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMTIzIiwiZXhwIjoxNzAwMDAwMDAwfQ.xK9mN2pQ7vR4wY1zA8bC5dE0fG3hI6jL"
+# Regression: low-entropy HS256 session token wrapped in single quotes.
+# Previously missed because:
+#   1. trufflehog's JWT detector intentionally skips HMAC-signed JWTs
+#      (HS256/HS384/HS512) — see trufflehog/pkg/detectors/jwt/jwt.go.
+#   2. betterleaks's default `jwt` rule has an entropy<=3.0 filter that
+#      rejects JWTs with structured low-entropy payloads (human-readable
+#      usernames, role names like "Guest", short org names).
+# kl-scan now clears that betterleaks entropy filter via applyKLScanOverrides
+# in internal/detect/betterleaks/detector.go.
+echo "accesstoken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9.XBbaOOjP86GJ1DKDzEykL8i13e6P_e7yaUA8WBfLAls'"
+
+# ---------------------------------------------------------------------------
+# 10b. JWT split across line boundary (cross-line detection regression)
+#
+# The kubelet's CRI log driver splits any single container stdout write
+# that exceeds its internal buffer (commonly ~16 KiB) into consecutive
+# log entries. The apiserver's pods/log endpoint emits these as separate
+# newline-delimited lines. A JWT straddling that split is invisible to any
+# strictly per-line detector.
+#
+# This fixture writes a line long enough that the JWT lands across the
+# kubelet boundary. kl-scan's streamer sliding-window pass
+# (internal/kube/window.go) concatenates adjacent lines and re-runs
+# detection on the joined view to catch these cases.
+#
+# Note on the pad length: 16380 bytes places the mid-JWT split near the
+# common 16384-byte kubelet boundary. The exact split point varies by
+# runtime (some count the timestamp prefix toward the limit, some don't);
+# ±64 bytes of adjustment may be needed when testing against a specific
+# cluster runtime. The unit test in internal/kube/window_test.go uses a
+# controlled split and does not depend on this approximation.
+# ---------------------------------------------------------------------------
+log "section: JWT (cross-line split regression)"
+printf '%016380s%s\n' ' ' "accesstoken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI0NWZkMWU1NC0yZGE0LTRmYzUtODA4NS01ZDA4ZmFmZmQ3MjUiLCJzdWIiOiJTaHJhZGRoYS5QYXJpa2gxIiwiZW5kX3VzZXIiOiJTaHJhZGRoYS5QYXJpa2gxIiwib3JnX25hbWUiOiJHTTRDIiwiYWNjdE5hbWUiOiJ3M0lCTSIsInJvbGUiOiJHdWVzdCIsInR5cGUiOiJTU08iLCJleHAiOjE3ODAzMDI2MzEsImlhdCI6MTc4MDI5OTAzMX0.olVIiAsroMhXhSh8howvwsdkFTmrXnA2wckgUK4APog'"
 
 # ---------------------------------------------------------------------------
 # 11. Private key (PEM)

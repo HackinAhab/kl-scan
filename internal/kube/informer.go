@@ -32,7 +32,7 @@ func (k TargetKey) String() string {
 
 // IndexConfig configures a TargetIndex.
 type IndexConfig struct {
-	Namespace     string // empty = all namespaces
+	Namespaces    []string // nil/empty = all namespaces
 	LabelSelector string
 	FieldSelector string
 	ResyncPeriod  time.Duration
@@ -41,8 +41,8 @@ type IndexConfig struct {
 // TargetIndex maintains an authoritative, live view of running pod containers
 // using a SharedInformer. It exposes Snapshot() for the rotator.
 type TargetIndex struct {
-	cfg     IndexConfig
-	factory informers.SharedInformerFactory
+	cfg       IndexConfig
+	factories []informers.SharedInformerFactory
 
 	mu      sync.RWMutex
 	targets map[TargetKey]PodTarget
@@ -69,47 +69,59 @@ func NewTargetIndex(client *Client, cfg IndexConfig) (*TargetIndex, error) {
 		}
 	}
 
-	factory := informers.NewSharedInformerFactoryWithOptions(
-		client.Clientset,
-		cfg.ResyncPeriod,
-		informers.WithNamespace(cfg.Namespace),
-		informers.WithTweakListOptions(func(o *metav1.ListOptions) {
-			o.LabelSelector = cfg.LabelSelector
-			o.FieldSelector = cfg.FieldSelector
-		}),
-	)
-
-	idx := &TargetIndex{
-		cfg:      cfg,
-		factory:  factory,
-		targets:  make(map[TargetKey]PodTarget),
-		syncedCh: make(chan struct{}),
+	namespaces := cfg.Namespaces
+	if len(namespaces) == 0 {
+		namespaces = []string{""}
 	}
 
-	podInformer := factory.Core().V1().Pods().Informer()
-	_, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    idx.onAdd,
-		UpdateFunc: idx.onUpdate,
-		DeleteFunc: idx.onDelete,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("register pod event handler: %w", err)
+	idx := &TargetIndex{
+		cfg:       cfg,
+		factories: make([]informers.SharedInformerFactory, 0, len(namespaces)),
+		targets:   make(map[TargetKey]PodTarget),
+		syncedCh:  make(chan struct{}),
+	}
+
+	tweakOpts := func(o *metav1.ListOptions) {
+		o.LabelSelector = cfg.LabelSelector
+		o.FieldSelector = cfg.FieldSelector
+	}
+
+	for _, ns := range namespaces {
+		factory := informers.NewSharedInformerFactoryWithOptions(
+			client.Clientset,
+			cfg.ResyncPeriod,
+			informers.WithNamespace(ns),
+			informers.WithTweakListOptions(tweakOpts),
+		)
+		podInformer := factory.Core().V1().Pods().Informer()
+		_, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    idx.onAdd,
+			UpdateFunc: idx.onUpdate,
+			DeleteFunc: idx.onDelete,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("register pod event handler (namespace=%q): %w", ns, err)
+		}
+		idx.factories = append(idx.factories, factory)
 	}
 
 	return idx, nil
 }
 
-// Run starts the informer factory and blocks until ctx is done.
-// It signals readiness on the channel returned by Synced once the cache is
+// Run starts the informer factories and blocks until ctx is done.
+// It signals readiness on the channel returned by Synced once all caches are
 // initially populated.
 func (i *TargetIndex) Run(ctx context.Context) error {
-	i.factory.Start(ctx.Done())
+	for _, f := range i.factories {
+		f.Start(ctx.Done())
+	}
 
-	// Wait for the pod informer cache to sync.
-	synced := i.factory.WaitForCacheSync(ctx.Done())
-	for v, ok := range synced {
-		if !ok {
-			return fmt.Errorf("informer cache failed to sync for %v", v)
+	for _, f := range i.factories {
+		synced := f.WaitForCacheSync(ctx.Done())
+		for v, ok := range synced {
+			if !ok {
+				return fmt.Errorf("informer cache failed to sync for %v", v)
+			}
 		}
 	}
 	i.once.Do(func() { close(i.syncedCh) })

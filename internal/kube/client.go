@@ -9,18 +9,18 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// Client holds a configured Kubernetes clientset and the resolved target namespace.
+// Client holds a configured Kubernetes clientset and the resolved target namespaces.
 type Client struct {
-	Clientset kubernetes.Interface
-	Namespace string // resolved target namespace (empty = all)
+	Clientset  kubernetes.Interface
+	Namespaces []string // resolved target namespaces (nil/empty = all)
 }
 
 // Config holds the parameters for building a Kubernetes client.
 type Config struct {
 	KubeconfigPath string
 	ContextName    string
-	Namespace      string // explicit -n flag value; empty = use context default
-	AllNamespaces  bool   // -A flag
+	Namespaces     []string // explicit -n flag values; nil = use context default
+	AllNamespaces  bool     // -A flag
 }
 
 // NewClient constructs a Client from the given config.
@@ -54,33 +54,32 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("cannot build kube clientset: %w", err)
 	}
 
-	ns := resolveNamespace(cfg, kubeConfig)
+	ns := resolveNamespaces(cfg, kubeConfig)
 
 	return &Client{
-		Clientset: cs,
-		Namespace: ns,
+		Clientset:  cs,
+		Namespaces: ns,
 	}, nil
 }
 
-// resolveNamespace determines the target namespace from flags and kubeconfig.
-//   - AllNamespaces → empty string (caller interprets as "all")
-//   - explicit -n <ns> → that namespace
+// resolveNamespaces determines the target namespaces from flags and kubeconfig.
+//   - AllNamespaces → nil (caller interprets as "all")
+//   - explicit -n <ns,...> → those namespaces
 //   - neither → current context's namespace, falling back to "default"
-func resolveNamespace(cfg Config, kc clientcmd.ClientConfig) string {
+func resolveNamespaces(cfg Config, kc clientcmd.ClientConfig) []string {
 	if cfg.AllNamespaces {
-		return ""
+		return nil
 	}
-	if cfg.Namespace != "" {
-		return cfg.Namespace
+	if len(cfg.Namespaces) > 0 {
+		return cfg.Namespaces
 	}
 	// Read current context namespace.
 	ns, _, err := kc.Namespace()
 	if err != nil || ns == "" {
-		// Check KUBECONFIG env-driven namespace.
 		if env := os.Getenv("POD_NAMESPACE"); env != "" {
-			return env
+			return []string{env}
 		}
-		return "default"
+		return []string{"default"}
 	}
-	return ns
+	return []string{ns}
 }
