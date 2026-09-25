@@ -3,11 +3,9 @@ package betterleaks
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
-	"github.com/spf13/viper"
 	blconfig "github.com/betterleaks/betterleaks/config"
 	bldetect "github.com/betterleaks/betterleaks/detect"
 
@@ -43,7 +41,7 @@ func New(rulesPath string) (detect.Detector, error) {
 // newFromDefault constructs a Detector from the embedded default TOML with
 // validation explicitly disabled.
 func newFromDefault() (*bldetect.Detector, error) {
-	cfg, err := parseTOMLConfig(strings.NewReader(blconfig.DefaultConfig))
+	cfg, err := blconfig.Default()
 	if err != nil {
 		return nil, fmt.Errorf("default config: %w", err)
 	}
@@ -97,30 +95,11 @@ func newFromPath(path string) (*bldetect.Detector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read rules file %q: %w", path, err)
 	}
-	cfg, err := parseTOMLConfig(strings.NewReader(string(data)))
+	cfg, err := blconfig.ParseTOML(data, path)
 	if err != nil {
 		return nil, fmt.Errorf("rules file %q: %w", path, err)
 	}
 	return bldetect.NewDetectorContext(context.Background(), cfg, bldetect.ValidationOptions{}), nil
-}
-
-// parseTOMLConfig parses a betterleaks TOML ruleset via viper and translates
-// it into the internal config form shared by the default and custom paths.
-func parseTOMLConfig(r io.Reader) (*blconfig.Config, error) {
-	viper.Reset()
-	viper.SetConfigType("toml")
-	if err := viper.ReadConfig(r); err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
-	}
-	var vc blconfig.ViperConfig
-	if err := viper.Unmarshal(&vc); err != nil {
-		return nil, fmt.Errorf("unmarshal config: %w", err)
-	}
-	cfg, err := vc.Translate()
-	if err != nil {
-		return nil, fmt.Errorf("translate config: %w", err)
-	}
-	return cfg, nil
 }
 
 // Name implements detect.Detector.
