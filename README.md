@@ -44,6 +44,7 @@ Concurrency:
 Output:
       --output string          Output format: console|json (default console)
       --redacted               Mask matched secret values in output
+      --no-report              Disable default kl-scan-pods.md and kl-scan-evidence.md reports
 
 Auth:
       --kubeconfig string      Path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)
@@ -170,6 +171,38 @@ Summary: 3 findings across 2 pods (1 high, 2 medium)  •  scanned 47 pods / 51 
 ```
 
 Run-level summary is printed to **stderr** so `stdout` stays clean for piping.
+
+### Markdown reports
+
+```bash
+kl-scan -A
+# Or omit raw log context and mask matched secrets:
+kl-scan -A --redacted
+# Disable both Markdown reports:
+kl-scan -A --no-report
+```
+
+By default, every scan writes two additional files in the current directory without changing
+console/JSON output:
+
+- `kl-scan-pods.md`: only pod names with emitted findings, one name per line,
+  deduplicated across containers and namespaces.
+- `kl-scan-evidence.md`: report-ready Markdown with each matched secret, its
+  source log message, namespace/pod/container, node, rule, severity, timestamp,
+  and stream-relative line number. Cross-line detections show joined fragments;
+  the line number/timestamp refer to the last fragment.
+
+Both files are created with owner-only permissions (`0600`) and must not already
+exist; move previous reports or use another working directory before a new run.
+Alternatively, pass `--no-report` to scan without creating either report file.
+They are updated as findings arrive, including in watch mode. Existing dedup
+rules still apply: findings suppressed by persisted watch state are not included
+in a new report (`--state-disabled` starts fresh in-memory dedup).
+
+**Sensitive evidence:** unredacted reports contain live secrets and may include
+other sensitive values in the same log message. With `--redacted`, matched values
+are masked and raw log context is omitted to avoid exposing other secrets.
+Review evidence before sharing it. A scan with no findings creates empty files.
 
 ## Exit Codes
 

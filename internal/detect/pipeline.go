@@ -132,10 +132,13 @@ func (p *Pipeline) processLine(ll LogLine) {
 				Match:       m.Value,
 				ValueSHA256: valHash,
 				Context:     m.Context,
+				LogMessage:  ll.Line,
 				Entropy:     m.Entropy,
 				Redacted:    p.redacted,
 			}
 			if p.redacted {
+				// Other secrets in the source message may not match this finding.
+				f.LogMessage = ""
 				f.Context = report.RedactSpan(f.Context, m.Value)
 				f.Match = report.Mask(m.Value)
 			}

@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"syscall"
@@ -48,8 +49,9 @@ secrets, API keys, tokens, and other sensitive values.
 Pass --watch to run continuously: kl-scan rotates through the pod set in
 batches, observing each batch for a window before moving on. Findings are
 deduped on disk so the same secret is not reported repeatedly within a run.`,
-		Version:      version,
-		SilenceUsage: true,
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runScan(cmd.Context(), f)
 		},
@@ -80,6 +82,7 @@ deduped on disk so the same secret is not reported repeatedly within a run.`,
 	fl.StringVar(&f.Output, "output", "console", "output format: console|json")
 	fl.BoolVar(&f.Redacted, "redacted", false, "mask matched secret values in output")
 	fl.StringVar(&f.Out, "out", "", "write output to this file path (in addition to stdout)")
+	fl.BoolVar(&f.NoReport, "no-report", false, "disable default kl-scan-pods.md and kl-scan-evidence.md reports")
 
 	// Auth
 	fl.StringVar(&f.Kubeconfig, "kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
@@ -105,10 +108,20 @@ deduped on disk so the same secret is not reported repeatedly within a run.`,
 	root.SetContext(ctx)
 
 	if err := root.ExecuteContext(ctx); err != nil {
+		var exit scanExit
+		if errors.As(err, &exit) {
+			return int(exit)
+		}
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		return cli.ExitError
 	}
 	return cli.ExitClean
 }
+
+// scanExit lets scan cleanup finish before main exits with the finding status.
+type scanExit int
+
+func (e scanExit) Error() string { return fmt.Sprintf("scan completed with exit code %d", e) }
 
 // runtime bundles the shared, mode-independent setup.
 type runtimeCtx struct {
@@ -116,7 +129,7 @@ type runtimeCtx struct {
 	detectors []detect.Detector
 	client    *kube.Client
 	sink      outputSink
-	closeSink func()
+	closeSink func() error
 	pipeline  *detect.Pipeline
 }
 
@@ -165,7 +178,7 @@ func setup(f cli.Flags) (*runtimeCtx, error) {
 }
 
 // runScan dispatches to one-shot or watch mode based on flags.
-func runScan(ctx context.Context, f cli.Flags) error {
+func runScan(ctx context.Context, f cli.Flags) (err error) {
 	if len(f.Namespaces) > 0 && f.AllNamespaces {
 		return fmt.Errorf("--namespace and --all-namespaces are mutually exclusive")
 	}
@@ -173,7 +186,11 @@ func runScan(ctx context.Context, f cli.Flags) error {
 	if err != nil {
 		return err
 	}
-	defer rt.closeSink()
+	defer func() {
+		if closeErr := rt.closeSink(); closeErr != nil {
+			err = closeErr
+		}
+	}()
 
 	if f.Watch {
 		return runWatch(ctx, rt)
@@ -197,7 +214,7 @@ func runOnce(ctx context.Context, rt *runtimeCtx) error {
 
 	if len(targets) == 0 {
 		fmt.Fprintf(os.Stderr, "kl-scan: no running pods found\n")
-		os.Exit(cli.ExitClean)
+		return nil
 	}
 
 	podCount := kube.CountPods(targets)
@@ -240,7 +257,9 @@ func runOnce(ctx context.Context, rt *runtimeCtx) error {
 	if streamErrs > 0 {
 		exitCode = cli.ExitPartial
 	}
-	os.Exit(exitCode)
+	if exitCode != cli.ExitClean {
+		return scanExit(exitCode)
+	}
 	return nil
 }
 
@@ -268,7 +287,6 @@ func runWatch(ctx context.Context, rt *runtimeCtx) error {
 				"kl-scan: another kl-scan process is using state file %q; aborting.\n"+
 					"Use --state-file to point at a different path, or stop the other process.\n",
 				f.StateFile)
-			os.Exit(cli.ExitError)
 		}
 		return fmt.Errorf("open state file: %w", err)
 	}
@@ -501,7 +519,9 @@ func runWatch(ctx context.Context, rt *runtimeCtx) error {
 	if rotator.StreamErrors() > 0 {
 		exitCode = cli.ExitPartial
 	}
-	os.Exit(exitCode)
+	if exitCode != cli.ExitClean {
+		return scanExit(exitCode)
+	}
 	return nil
 }
 
@@ -569,7 +589,60 @@ func (s *ndjsonSink) WriteSummary(sum report.Summary) {
 	fmt.Fprintln(os.Stderr)
 }
 
-func buildSink(f cli.Flags) (outputSink, func(), error) {
+func buildSink(f cli.Flags) (outputSink, func() error, error) {
+	var markdown *report.MarkdownWriter
+	if !f.NoReport {
+		for _, path := range []string{f.Out, f.StateFile} {
+			if path == "" {
+				continue
+			}
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, name := range []string{"kl-scan-pods.md", "kl-scan-evidence.md"} {
+				reportPath, err := filepath.Abs(name)
+				if err != nil {
+					return nil, nil, err
+				}
+				if abs == reportPath {
+					return nil, nil, fmt.Errorf("output/state path %q conflicts with Markdown report", path)
+				}
+			}
+		}
+		var err error
+		markdown, err = report.NewMarkdownWriter()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	sink, closeSink, err := buildPrimarySink(f)
+	if err != nil {
+		if markdown != nil {
+			_ = markdown.Close()
+		}
+		return nil, nil, err
+	}
+	if markdown == nil {
+		return sink, closeSink, nil
+	}
+	fmt.Fprintln(os.Stderr, "kl-scan: writing kl-scan-pods.md and kl-scan-evidence.md")
+	return &markdownSink{outputSink: sink, markdown: markdown}, func() error {
+		return errors.Join(markdown.Close(), closeSink())
+	}, nil
+}
+
+type markdownSink struct {
+	outputSink
+	markdown *report.MarkdownWriter
+}
+
+func (s *markdownSink) Emit(f report.Finding) {
+	s.outputSink.Emit(f)
+	s.markdown.Write(f)
+}
+
+func buildPrimarySink(f cli.Flags) (outputSink, func() error, error) {
 	var fileWriter io.WriteCloser
 	if f.Out != "" {
 		var fh *os.File
@@ -586,10 +659,11 @@ func buildSink(f cli.Flags) (outputSink, func(), error) {
 		fmt.Fprintf(os.Stderr, "kl-scan: writing output to %s\n", f.Out)
 	}
 
-	closer := func() {
+	closer := func() error {
 		if fileWriter != nil {
-			_ = fileWriter.Close()
+			return fileWriter.Close()
 		}
+		return nil
 	}
 
 	switch f.Output {

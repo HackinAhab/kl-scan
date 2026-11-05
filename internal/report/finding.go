@@ -32,6 +32,7 @@ type Finding struct {
 	Match       string    `json:"match"`
 	ValueSHA256 string    `json:"value_sha256"`
 	Context     string    `json:"context,omitempty"`
+	LogMessage  string    `json:"-"` // source message for Markdown evidence only
 	Entropy     float64   `json:"entropy,omitempty"`
 	Redacted    bool      `json:"redacted"`
 }
