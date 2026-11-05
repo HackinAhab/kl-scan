@@ -81,7 +81,7 @@ deduped on disk so the same secret is not reported repeatedly within a run.`,
 	// Output
 	fl.StringVar(&f.Output, "output", "console", "output format: console|json")
 	fl.BoolVar(&f.Redacted, "redacted", false, "mask matched secret values in output")
-	fl.StringVar(&f.Out, "out", "", "write output to this file path (in addition to stdout)")
+	fl.StringVarP(&f.Out, "out", "o", "", "write output to this file path (in addition to stdout); reports use the same directory")
 	fl.BoolVar(&f.NoReport, "no-report", false, "disable default timestamped Markdown pod and evidence reports")
 
 	// Auth
@@ -593,7 +593,7 @@ func buildSink(f cli.Flags) (outputSink, func() error, error) {
 	var markdown *report.MarkdownWriter
 	if !f.NoReport {
 		var err error
-		markdown, err = report.NewMarkdownWriter()
+		markdown, err = report.NewMarkdownWriter(filepath.Dir(f.Out))
 		if err != nil {
 			return nil, nil, err
 		}

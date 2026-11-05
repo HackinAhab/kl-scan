@@ -43,6 +43,7 @@ Concurrency:
 
 Output:
       --output string          Output format: console|json (default console)
+  -o, --out string             Write output to this file; reports use the same directory
       --redacted               Mask matched secret values in output
       --no-report              Disable default timestamped Markdown pod and evidence reports
 
@@ -182,7 +183,8 @@ kl-scan -A --redacted
 kl-scan -A --no-report
 ```
 
-By default, every scan writes two additional files in the current directory without changing
+By default, every scan writes two additional files beside the `-o` / `--out` output
+file (or in the current directory when no output file is set), without changing
 console/JSON output:
 
 - `kl-scan-pods-<timestamp>.md`: only pod names with emitted findings, one name per line,
@@ -198,6 +200,15 @@ Both files share a local-time suffix in `YYYY-MM-DD-HHMMSS` format, for example
 with owner-only permissions (`0600`), without overwriting earlier reports;
 timestamp collisions are retried. Actual filenames are printed to stderr.
 Pass `--no-report` to scan without creating either report file.
+
+For example, with an existing `klscan/` directory:
+
+```bash
+kl-scan -A --output json -o klscan/kl-scan.json
+```
+
+The JSON output and both timestamped Markdown reports are written into `klscan/`.
+The destination directory must already exist.
 They are updated as findings arrive, including in watch mode. Existing dedup
 rules still apply: findings suppressed by persisted watch state are not included
 in a new report (`--state-disabled` starts fresh in-memory dedup).
