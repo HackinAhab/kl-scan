@@ -20,17 +20,33 @@ type MarkdownWriter struct {
 
 // NewMarkdownWriter creates both reports without overwriting previous evidence.
 func NewMarkdownWriter() (*MarkdownWriter, error) {
-	pods, err := os.OpenFile("kl-scan-pods.md", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	for {
+		w, err := newMarkdownWriter(time.Now().Format("2006-01-02-150405"))
+		if errors.Is(err, os.ErrExist) {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		return w, err
+	}
+}
+
+func newMarkdownWriter(stamp string) (*MarkdownWriter, error) {
+	pods, err := os.OpenFile("kl-scan-pods-"+stamp+".md", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("create pod report: %w", err)
 	}
-	evidence, err := os.OpenFile("kl-scan-evidence.md", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	evidence, err := os.OpenFile("kl-scan-evidence-"+stamp+".md", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		_ = pods.Close()
 		_ = os.Remove(pods.Name())
 		return nil, fmt.Errorf("create evidence report: %w", err)
 	}
 	return &MarkdownWriter{pods: pods, evidence: evidence, seen: make(map[string]bool)}, nil
+}
+
+// Paths returns the paired report filenames for startup diagnostics.
+func (w *MarkdownWriter) Paths() (string, string) {
+	return w.pods.Name(), w.evidence.Name()
 }
 
 // Write is safe for concurrent pipeline workers. The first write error is retained.

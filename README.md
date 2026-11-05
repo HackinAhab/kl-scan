@@ -44,7 +44,7 @@ Concurrency:
 Output:
       --output string          Output format: console|json (default console)
       --redacted               Mask matched secret values in output
-      --no-report              Disable default kl-scan-pods.md and kl-scan-evidence.md reports
+      --no-report              Disable default timestamped Markdown pod and evidence reports
 
 Auth:
       --kubeconfig string      Path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)
@@ -185,16 +185,19 @@ kl-scan -A --no-report
 By default, every scan writes two additional files in the current directory without changing
 console/JSON output:
 
-- `kl-scan-pods.md`: only pod names with emitted findings, one name per line,
+- `kl-scan-pods-<timestamp>.md`: only pod names with emitted findings, one name per line,
   deduplicated across containers and namespaces.
-- `kl-scan-evidence.md`: report-ready Markdown with each matched secret, its
+- `kl-scan-evidence-<timestamp>.md`: report-ready Markdown with each matched secret, its
   source log message, namespace/pod/container, node, rule, severity, timestamp,
   and stream-relative line number. Cross-line detections show joined fragments;
   the line number/timestamp refer to the last fragment.
 
-Both files are created with owner-only permissions (`0600`) and must not already
-exist; move previous reports or use another working directory before a new run.
-Alternatively, pass `--no-report` to scan without creating either report file.
+Both files share a local-time suffix in `YYYY-MM-DD-HHMMSS` format, for example
+`kl-scan-pods-2026-11-05-095257.md` and
+`kl-scan-evidence-2026-11-05-095257.md`. Each run creates a new pair
+with owner-only permissions (`0600`), without overwriting earlier reports;
+timestamp collisions are retried. Actual filenames are printed to stderr.
+Pass `--no-report` to scan without creating either report file.
 They are updated as findings arrive, including in watch mode. Existing dedup
 rules still apply: findings suppressed by persisted watch state are not included
 in a new report (`--state-disabled` starts fresh in-memory dedup).

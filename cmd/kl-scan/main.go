@@ -82,7 +82,7 @@ deduped on disk so the same secret is not reported repeatedly within a run.`,
 	fl.StringVar(&f.Output, "output", "console", "output format: console|json")
 	fl.BoolVar(&f.Redacted, "redacted", false, "mask matched secret values in output")
 	fl.StringVar(&f.Out, "out", "", "write output to this file path (in addition to stdout)")
-	fl.BoolVar(&f.NoReport, "no-report", false, "disable default kl-scan-pods.md and kl-scan-evidence.md reports")
+	fl.BoolVar(&f.NoReport, "no-report", false, "disable default timestamped Markdown pod and evidence reports")
 
 	// Auth
 	fl.StringVar(&f.Kubeconfig, "kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
@@ -592,28 +592,32 @@ func (s *ndjsonSink) WriteSummary(sum report.Summary) {
 func buildSink(f cli.Flags) (outputSink, func() error, error) {
 	var markdown *report.MarkdownWriter
 	if !f.NoReport {
+		var err error
+		markdown, err = report.NewMarkdownWriter()
+		if err != nil {
+			return nil, nil, err
+		}
+		podsPath, evidencePath := markdown.Paths()
 		for _, path := range []string{f.Out, f.StateFile} {
 			if path == "" {
 				continue
 			}
 			abs, err := filepath.Abs(path)
 			if err != nil {
+				_ = markdown.Close()
 				return nil, nil, err
 			}
-			for _, name := range []string{"kl-scan-pods.md", "kl-scan-evidence.md"} {
+			for _, name := range []string{podsPath, evidencePath} {
 				reportPath, err := filepath.Abs(name)
 				if err != nil {
+					_ = markdown.Close()
 					return nil, nil, err
 				}
 				if abs == reportPath {
+					_ = markdown.Close()
 					return nil, nil, fmt.Errorf("output/state path %q conflicts with Markdown report", path)
 				}
 			}
-		}
-		var err error
-		markdown, err = report.NewMarkdownWriter()
-		if err != nil {
-			return nil, nil, err
 		}
 	}
 	sink, closeSink, err := buildPrimarySink(f)
@@ -626,7 +630,8 @@ func buildSink(f cli.Flags) (outputSink, func() error, error) {
 	if markdown == nil {
 		return sink, closeSink, nil
 	}
-	fmt.Fprintln(os.Stderr, "kl-scan: writing kl-scan-pods.md and kl-scan-evidence.md")
+	podsPath, evidencePath := markdown.Paths()
+	fmt.Fprintf(os.Stderr, "kl-scan: writing %s and %s\n", podsPath, evidencePath)
 	return &markdownSink{outputSink: sink, markdown: markdown}, func() error {
 		return errors.Join(markdown.Close(), closeSink())
 	}, nil
